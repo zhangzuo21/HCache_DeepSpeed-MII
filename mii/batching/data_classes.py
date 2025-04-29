@@ -72,6 +72,9 @@ class Request:
     last_in_prompt: bool
     post_processing: List[object]
     generate_params: GenerateParamsConfig
+    tokens_so_far: torch.Tensor
+    latents_in_window: torch.Tensor
+    recorded_len: int
 
     _next_token: Union[None, torch.Tensor] = None
     _is_done: bool = False

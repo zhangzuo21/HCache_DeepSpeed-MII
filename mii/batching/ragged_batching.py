@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from collections import deque, defaultdict
 from functools import cached_property
 from typing import Dict, Tuple, List, Any, Union, DefaultDict
+from .latent_storaging import storaging_engine
 
 import torch
 import ujson
@@ -76,6 +77,10 @@ class RaggedBatchBase:
         self._profiled_times: DefaultDict[str, List[int]] = defaultdict(list)
         self._iters: int = 0
         self._num_generated_tokens: int = 0
+        self.storaging_chunk_size = 4
+        self.model_size = 4096
+        self.model_layer_num = 32
+        self.storage_engine = storaging_engine.LatentStoragingEngie(self.storaging_chunk_size)
 
         # Use ZMQ because it is light-weight and fast for passing simple
         # messages (i.e., token sequences) between each TP process of the
@@ -114,9 +119,39 @@ class RaggedBatchBase:
 
         # 3. Put new tokens into inference engine
         if scheduled_requests.requests_to_run:
-            next_token_logits = self.put(
-                scheduled_requests.requests_to_run.uids,
-                scheduled_requests.requests_to_run.tokens,
+            restore_seq_ids = []
+            restore_seq_tokens = []
+            restore_latents = []
+            uids_to_run = []
+            tokens_to_run = []
+            for request in scheduled_requests:
+                if not request.is_flush_request:
+                    if request.num_generated_tokens == 0:
+                        restore_seq_ids.append(request.uid)
+                        latent = self.storage_engine.retrive(request.input_tokens)
+                        restore_latents.append(latent)
+                        restored_len = latent.shape[1] if not latent == None else 0
+                        request.recorded_len += restored_len
+                        restore_seq_tokens.append(request.input_tokens[0:request.recorded_len])
+                        request.tokens_so_far = request.input_tokens
+                        if request.recorded_len < len(request.input_tokens):
+                            uids_to_run.append(request.uid)
+                            tokens_to_run.append(request.input_tokens[request.recorded_len:])
+
+                    else:
+                        uids_to_run.append(request.uid)
+                        tokens_to_run.append(request.input_tokens)
+
+            # print(f"resotre latents: {restore_latents}")
+            self.inference_engine.restore_kv(restore_seq_ids, restore_seq_tokens, restore_latents)
+
+            # next_token_logits, latents = self.put(
+            #     self.scheduled_requests.requests_to_run.uids,
+            #     self.scheduled_requests.requests_to_run.tokens
+            # )
+            next_token_logits, latents = self.put(
+                uids_to_run,
+                tokens_to_run
             )
 
         # short circuit if not rank 0, only rank 0 does scheduling and postprocessing of logits
@@ -132,6 +167,22 @@ class RaggedBatchBase:
             )
             running_requests.next_tokens = next_tokens
             running_requests.done_tokens = done_tokens
+            for request, next_token, latent in zip(running_requests, next_tokens, latents):
+                window_offset = request.recorded_len % self.storaging_chunk_size
+                # print(f"window offset: {window_offset}")
+                if latent.shape[1] + window_offset >= self.storaging_chunk_size:
+                    value = torch.concat([request.latents_in_window[:, 0: window_offset], latent], dim=1)
+                    self.storage_engine.store_seq(request.tokens_so_far, value, request.recorded_len)
+                    residual_len = (latent.shape[1] + window_offset) % self.storaging_chunk_size
+                    request.latents_in_window[:, 0: residual_len].copy_(value[:, (latent.shape[1] + window_offset - residual_len):(latent.shape[1] + window_offset)])
+                    request.recorded_len += latent.shape[1] + window_offset - residual_len
+                elif not latent == None:
+                    request.latents_in_window[:, window_offset: window_offset + latent.shape[1]].copy_(latent)
+                    # request.
+                request.tokens_so_far = torch.concat([request.tokens_so_far, next_token.unsqueeze(0)], dim=0)
+                
+            # print("========")
+            # print(f"next_tokens:{next_tokens}, done_tokens: {done_tokens}")
 
         # 5. Schedule requests while we wait for the forward pass to finish
         self._reset_scheduler_bookkeeping()
@@ -373,6 +424,9 @@ class RaggedBatchBase:
                 last_in_prompt=None,
                 post_processing=None,
                 generate_params=None,
+                tokens_so_far=torch.empty(0, device='cpu'),
+                latents_in_window=torch.empty((self.model_layer_num, self.storaging_chunk_size, self.model_size), dtype=torch.bfloat16),
+                recorded_len=0
             ))
 
     def reset_request_status(self):
@@ -485,6 +539,9 @@ class RaggedBatchBase:
             last_in_prompt=True,
             post_processing=post_processing,
             generate_params=generate_params,
+            tokens_so_far=torch.empty(0, dtype=torch.bfloat16,device='cpu'),
+            latents_in_window=torch.empty((self.model_layer_num, self.storaging_chunk_size, self.model_size), dtype=torch.bfloat16),
+            recorded_len=0
         )
 
     def make_response(self,
@@ -497,7 +554,7 @@ class RaggedBatchBase:
                         generated_length=generated_length,
                         finish_reason=finish_reason)
 
-    def put(self, uids: List[int], tokenized_input: List[torch.Tensor]) -> torch.Tensor:
+    def put(self, uids: List[int], tokenized_input: List[torch.Tensor]) -> Tuple[torch.Tensor, List[torch.Tensor]]:
         # Call inference engine. You can skip checking schedulability because we already checked when scheduling
         return self.inference_engine.put(uids, tokenized_input, do_checks=False)
 
