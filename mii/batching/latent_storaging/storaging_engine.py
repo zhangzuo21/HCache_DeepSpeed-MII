@@ -4,7 +4,7 @@ import torch
 class LatentStoragingEngie:
     def __init__(self, chunk_size):
         self.chunk_size = chunk_size
-        self.backend = StorageBackend(16000000, '/home/zzy/storage_path', chunk_size)
+        self.backend = StorageBackend(160000000, '/home/zzy/storage_path', chunk_size)
 
     def retrive(self, seq: torch.Tensor):
         retrived_list = []

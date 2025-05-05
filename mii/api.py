@@ -6,7 +6,7 @@ from typing import Optional, Any, Dict, Tuple
 
 import mii
 from mii.backend import MIIClient  # , MIIServer
-from mii.batching import MIIPipeline, MIIAsyncPipeline
+from mii.batching import MIIPipeline, MIIAsyncPipeline, MultiRoundPipeline
 from mii.config import get_mii_config, ModelConfig, MIIConfig
 from mii.constants import DeploymentType
 from mii.errors import UnknownArgument
@@ -237,6 +237,29 @@ def pipeline(
         all_rank_output=all_rank_output,
     )
     return inference_pipeline
+
+def multiround_pipeline(model_name_or_path: str = "",
+    model_config: Optional[Dict] = None,
+    all_rank_output: bool = False,
+    **kwargs,) -> MultiRoundPipeline:
+
+    model_config, remaining_kwargs = _parse_kwargs_to_model_config(
+        model_name_or_path=model_name_or_path, model_config=model_config, **kwargs
+    )
+    if remaining_kwargs:
+        raise UnknownArgument(
+            f"Keyword argument(s) {remaining_kwargs.keys()} not recognized")
+    
+    inference_engine = load_model(model_config)
+    tokenizer = load_tokenizer(model_config)
+    inference_pipeline = MultiRoundPipeline(
+        inference_engine=inference_engine,
+        tokenizer=tokenizer,
+        model_config=model_config,
+        all_rank_output=all_rank_output,
+    )
+    return inference_pipeline
+
 
 
 def async_pipeline(model_config: ModelConfig) -> MIIAsyncPipeline:

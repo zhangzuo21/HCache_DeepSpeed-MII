@@ -3,4 +3,4 @@
 
 # DeepSpeed Team
 
-from .ragged_batching import MIIAsyncPipeline, MIIPipeline
+from .ragged_batching import MIIAsyncPipeline, MIIPipeline, MultiRoundPipeline

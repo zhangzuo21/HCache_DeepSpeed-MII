@@ -20,6 +20,7 @@ import ujson
 import zmq
 from deepspeed.accelerator import get_accelerator
 from deepspeed.utils.timer import SynchronizedWallClockTimer
+import multiprocessing as mp
 
 from mii.batching.constants import TOP_K_NAME, TOP_P_NAME, TEMP_NAME, SAMPLER_NAME, STOP_NAME
 from mii.batching.data_classes import Response, Request, RequestBatch
@@ -132,11 +133,16 @@ class RaggedBatchBase:
                         restore_latents.append(latent)
                         restored_len = latent.shape[1] if not latent == None else 0
                         request.recorded_len += restored_len
-                        restore_seq_tokens.append(request.input_tokens[0:request.recorded_len])
                         request.tokens_so_far = request.input_tokens
                         if request.recorded_len < len(request.input_tokens):
                             uids_to_run.append(request.uid)
                             tokens_to_run.append(request.input_tokens[request.recorded_len:])
+                            restore_seq_tokens.append(request.input_tokens[0:request.recorded_len])
+                        else:
+                            # reserve one token to process logits
+                            uids_to_run.append(request.uid)
+                            tokens_to_run.append(request.input_tokens[(request.recorded_len - 1):])
+                            restore_seq_tokens.append(request.input_tokens[0:(request.recorded_len - 1)])
 
                     else:
                         uids_to_run.append(request.uid)
@@ -144,6 +150,7 @@ class RaggedBatchBase:
 
             # print(f"resotre latents: {restore_latents}")
             self.inference_engine.restore_kv(restore_seq_ids, restore_seq_tokens, restore_latents)
+
 
             # next_token_logits, latents = self.put(
             #     self.scheduled_requests.requests_to_run.uids,
@@ -713,6 +720,34 @@ class MIIPipeline(RaggedBatchBase):
         gc.collect()
         get_accelerator().empty_cache()
         self._destroyed = True
+
+# multi turn for a single request
+class MultiRoundPipeline(RaggedBatchBase):
+    def __init__(self, all_rank_output: bool = False, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.tid = threading.get_ident()
+        get_accelerator().set_device(int(os.getenv("LOCAL_RANK", "0")))
+
+    def __call__(self, prompt: List[str], **kwargs):
+        curr_prompt = prompt[0]
+        self.result_queues[self.tid] = queue.Queue()
+        for i in range(len(prompt)):
+            input_tokens = self.tokenizer.encode(curr_prompt)
+            request = self.make_request(self.tid, i, input_tokens, kwargs)
+            self.request_queue.put(request)
+            while self.result_queues[self.tid].empty():
+                self.generate()
+            result = self.result_queues[self.tid].get()
+            generated_tokens = self.tokenizer.decode(result[1])
+            response = self.make_response(generated_tokens, result[2], result[3], result[4])
+            if i < len(prompt) - 1:
+                curr_prompt = curr_prompt + response.generated_text + prompt[i + 1]
+            print("==============")
+            print(response.generated_text)
+            self.flush([i])
+
+
+        
 
 
 class MIIAsyncPipeline(RaggedBatchBase):
