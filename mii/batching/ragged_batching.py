@@ -14,6 +14,7 @@ from collections import deque, defaultdict
 from functools import cached_property
 from typing import Dict, Tuple, List, Any, Union, DefaultDict
 from .latent_storaging import storaging_engine
+import time
 
 import torch
 import ujson
@@ -111,7 +112,7 @@ class RaggedBatchBase:
         """
         This is the main loop of FastGen: puts requests and gets generated results.
         """
-
+        # start = time.time()
         # 1. Get a batch of requests, broadcast to all ranks
         scheduled_requests, force = self._bcast_requests()
 
@@ -149,16 +150,15 @@ class RaggedBatchBase:
                         tokens_to_run.append(request.input_tokens)
 
             # print(f"resotre latents: {restore_latents}")
-            self.inference_engine.restore_kv(restore_seq_ids, restore_seq_tokens, restore_latents)
+            # self.inference_engine.restore_kv(restore_seq_ids, restore_seq_tokens, restore_latents)
 
 
-            # next_token_logits, latents = self.put(
-            #     self.scheduled_requests.requests_to_run.uids,
-            #     self.scheduled_requests.requests_to_run.tokens
-            # )
             next_token_logits, latents = self.put(
                 uids_to_run,
-                tokens_to_run
+                tokens_to_run,
+                restore_seq_ids,
+                restore_seq_tokens,
+                restore_latents
             )
 
         # short circuit if not rank 0, only rank 0 does scheduling and postprocessing of logits
@@ -210,6 +210,9 @@ class RaggedBatchBase:
 
         if self.profile_model_time:
             self._print_profiled_times()
+        # end = time.time()
+
+        # print(f"执行时间: {end - start:.4f} 秒")
 
     def _print_profiled_times(self) -> None:
         self._iters += 1
@@ -561,9 +564,15 @@ class RaggedBatchBase:
                         generated_length=generated_length,
                         finish_reason=finish_reason)
 
-    def put(self, uids: List[int], tokenized_input: List[torch.Tensor]) -> Tuple[torch.Tensor, List[torch.Tensor]]:
+    def put(self, uids: List[int], tokenized_input: List[torch.Tensor], restore_uids: List[torch.Tensor],
+            restore_tokens: List[torch.Tensor],
+            restore_latents: List[torch.Tensor],) -> Tuple[torch.Tensor, List[torch.Tensor]]:
         # Call inference engine. You can skip checking schedulability because we already checked when scheduling
-        return self.inference_engine.put(uids, tokenized_input, do_checks=False)
+        return self.inference_engine.put(uids, tokenized_input, restore_uids, restore_tokens, restore_latents, do_checks=False)
+
+    # def put(self, uids: List[int], tokenized_input: List[torch.Tensor]) -> Tuple[torch.Tensor, List[torch.Tensor]]:
+    #         # Call inference engine. You can skip checking schedulability because we already checked when scheduling
+    #         return self.inference_engine.put(uids, tokenized_input, do_checks=False)
 
     def flush(self, uids: List[int]) -> None:
         for uid in uids:
@@ -743,7 +752,7 @@ class MultiRoundPipeline(RaggedBatchBase):
             if i < len(prompt) - 1:
                 curr_prompt = curr_prompt + response.generated_text + prompt[i + 1]
             print("==============")
-            print(response.generated_text)
+            print(self._profiled_times)
             self.flush([i])
 
 
