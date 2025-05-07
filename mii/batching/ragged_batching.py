@@ -636,6 +636,7 @@ class MIIPipeline(RaggedBatchBase):
         self._all_rank_output = all_rank_output
         self._destroyed = False
         get_accelerator().set_device(int(os.getenv("LOCAL_RANK", "0")))
+        self.prefill_time = []
 
     def __call__(self,
                  prompts: Union[str,
@@ -654,6 +655,7 @@ class MIIPipeline(RaggedBatchBase):
         if self._destroyed:
             raise RuntimeError(
                 "The inference engine of this pipeline has been destroyed.")
+        profiled_time = []
 
         if isinstance(prompts, str):
             prompts = [prompts]
@@ -674,7 +676,11 @@ class MIIPipeline(RaggedBatchBase):
                     self._queue_flush_request(uid)
                     uids_complete_order.append(uid)
                     uids_running.remove(uid)
+                begin = time.time()
                 self.generate()
+                end = time.time()
+                profiled_time.append(end - begin)
+
             # Ensure final flush requests broadcast and
             # kick ranks 1 -> n out of the while loop
             self._bcast_requests(force=True)
@@ -695,6 +701,8 @@ class MIIPipeline(RaggedBatchBase):
 
         if self._all_rank_output:
             outputs = self._bcast_responses(outputs)
+
+        self.prefill_time.append(profiled_time[1])
 
         return outputs
 
