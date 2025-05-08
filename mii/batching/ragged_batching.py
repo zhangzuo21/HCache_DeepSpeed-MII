@@ -84,6 +84,8 @@ class RaggedBatchBase:
         self.model_layer_num = 32
         self.storage_engine = storaging_engine.LatentStoragingEngie(self.storaging_chunk_size)
 
+        self._save_queue = queue.Queue()
+
         # Use ZMQ because it is light-weight and fast for passing simple
         # messages (i.e., token sequences) between each TP process of the
         # inference engine
@@ -153,7 +155,7 @@ class RaggedBatchBase:
             # self.inference_engine.restore_kv(restore_seq_ids, restore_seq_tokens, restore_latents)
 
 
-            next_token_logits, latents = self.put(
+            next_token_logits = self.put(
                 uids_to_run,
                 tokens_to_run,
                 restore_seq_ids,
@@ -174,17 +176,18 @@ class RaggedBatchBase:
             )
             running_requests.next_tokens = next_tokens
             running_requests.done_tokens = done_tokens
-            for request, next_token, latent in zip(running_requests, next_tokens, latents):
-                window_offset = request.recorded_len % self.storaging_chunk_size
-                # print(f"window offset: {window_offset}")
-                if latent.shape[1] + window_offset >= self.storaging_chunk_size:
-                    value = torch.concat([request.latents_in_window[:, 0: window_offset], latent], dim=1)
-                    self.storage_engine.store_seq(request.tokens_so_far, value, request.recorded_len)
-                    residual_len = (latent.shape[1] + window_offset) % self.storaging_chunk_size
-                    request.latents_in_window[:, 0: residual_len].copy_(value[:, (latent.shape[1] + window_offset - residual_len):(latent.shape[1] + window_offset)])
-                    request.recorded_len += latent.shape[1] + window_offset - residual_len
-                elif not latent == None:
-                    request.latents_in_window[:, window_offset: window_offset + latent.shape[1]].copy_(latent)
+            self._save_queue.put(running_requests)
+            for request, next_token in zip(running_requests, next_tokens):
+                # window_offset = request.recorded_len % self.storaging_chunk_size
+                # # print(f"window offset: {window_offset}")
+                # if latent.shape[1] + window_offset >= self.storaging_chunk_size:
+                #     value = torch.concat([request.latents_in_window[:, 0: window_offset], latent], dim=1)
+                #     self.storage_engine.store_seq(request.tokens_so_far, value, request.recorded_len)
+                #     residual_len = (latent.shape[1] + window_offset) % self.storaging_chunk_size
+                #     request.latents_in_window[:, 0: residual_len].copy_(value[:, (latent.shape[1] + window_offset - residual_len):(latent.shape[1] + window_offset)])
+                #     request.recorded_len += latent.shape[1] + window_offset - residual_len
+                # elif not latent == None:
+                #     request.latents_in_window[:, window_offset: window_offset + latent.shape[1]].copy_(latent)
                     # request.
                 request.tokens_so_far = torch.concat([request.tokens_so_far, next_token.unsqueeze(0)], dim=0)
                 
@@ -213,6 +216,55 @@ class RaggedBatchBase:
         # end = time.time()
 
         # print(f"执行时间: {end - start:.4f} 秒")
+
+    def _deamon_process(self):
+        while True:
+            seq_descriptor = None
+            latents_buffer = None
+            splitted_latents = []
+            layer_idx = 0
+            while True:
+                try:
+                    item = self._save_queue.get(timeout=0.01)
+                    if isinstance(item, torch.Tensor):
+                        # seq_descriptor
+                        if item.shape[1] == 4:
+                            seq_descriptor = item
+                            token_num = 0
+                            for seq in seq_descriptor:
+                                if seq[1] != 0:
+                                    token_num += seq[1]
+                                else:
+                                    break
+                            latents_buffer = torch.empty((self.model_layer_num, token_num, self.model_size), dtype=torch.bfloat16)
+                        # latent
+                        else:
+                            latents_buffer[layer_idx].copy_(item)
+                            layer_idx += 1
+                            if layer_idx == self.model_layer_num:
+                                for idx, seq_descriptor in enumerate(seq_descriptor):                       
+                                    seq_begin = seq_descriptor[0]
+                                    seq_len = seq_descriptor[1]
+                                    splitted_latents.append(latents_buffer[:, seq_begin:seq_begin + seq_len])
+                    elif item == "end":
+                        return
+                    # store
+                    else:
+                        for request, latent in zip(item, splitted_latents):
+                            window_offset = request.recorded_len % self.storaging_chunk_size
+                            # print(f"window offset: {window_offset}")
+                            if latent.shape[1] + window_offset >= self.storaging_chunk_size:
+                                value = torch.concat([request.latents_in_window[:, 0: window_offset], latent], dim=1)
+                                self.storage_engine.store_seq(request.tokens_so_far, value, request.recorded_len)
+                                residual_len = (latent.shape[1] + window_offset) % self.storaging_chunk_size
+                                request.latents_in_window[:, 0: residual_len].copy_(value[:, (latent.shape[1] + window_offset - residual_len):(latent.shape[1] + window_offset)])
+                                request.recorded_len += latent.shape[1] + window_offset - residual_len
+                            elif not latent == None:
+                                request.latents_in_window[:, window_offset: window_offset + latent.shape[1]].copy_(latent)
+                                # request.
+                        break
+                except queue.Empty:
+                    continue
 
     def _print_profiled_times(self) -> None:
         self._iters += 1
@@ -566,9 +618,9 @@ class RaggedBatchBase:
 
     def put(self, uids: List[int], tokenized_input: List[torch.Tensor], restore_uids: List[torch.Tensor],
             restore_tokens: List[torch.Tensor],
-            restore_latents: List[torch.Tensor],) -> Tuple[torch.Tensor, List[torch.Tensor]]:
+            restore_latents: List[torch.Tensor],) -> torch.Tensor:
         # Call inference engine. You can skip checking schedulability because we already checked when scheduling
-        return self.inference_engine.put(uids, tokenized_input, restore_uids, restore_tokens, restore_latents, do_checks=False)
+        return self.inference_engine.put(uids, tokenized_input, restore_uids, restore_tokens, restore_latents, self._save_queue, do_checks=False)
 
     # def put(self, uids: List[int], tokenized_input: List[torch.Tensor]) -> Tuple[torch.Tensor, List[torch.Tensor]]:
     #         # Call inference engine. You can skip checking schedulability because we already checked when scheduling
@@ -655,6 +707,10 @@ class MIIPipeline(RaggedBatchBase):
         if self._destroyed:
             raise RuntimeError(
                 "The inference engine of this pipeline has been destroyed.")
+        
+        deamon = threading.Thread(target=self._deamon_process)
+        deamon.start()
+
         profiled_time = []
 
         if isinstance(prompts, str):
@@ -703,6 +759,9 @@ class MIIPipeline(RaggedBatchBase):
             outputs = self._bcast_responses(outputs)
 
         self.prefill_time.append(profiled_time[1])
+
+        self._save_queue.put("end")
+        deamon.join()
 
         return outputs
 
