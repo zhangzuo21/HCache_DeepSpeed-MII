@@ -241,6 +241,7 @@ class RaggedBatchBase:
                         # latent
                         else:
                             latents_buffer[layer_idx].copy_(item)
+                            time.sleep(0)
                             layer_idx += 1
                             if layer_idx == self.model_layer_num:
                                 for idx, seq_descriptor in enumerate(seq_descriptor):                       

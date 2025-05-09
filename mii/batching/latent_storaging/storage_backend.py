@@ -12,7 +12,7 @@ class StorageBackend:
         self.chunk_size = chunk_size
         # self.env = lmdb.open(path, map_size=max_storage_size)
         # self.redis = redis.Redis(host="localhost", port=6380, db=0)
-        self.r_sync = redis.Redis(host='localhost', port=6380, db=0)
+        self.r_sync = redis.Redis(host='localhost', port=6381, db=0)
 
     def initialize_async(self, redis):
         # self.redis = redis.Redis(host="localhost", port=6380, db=0)
