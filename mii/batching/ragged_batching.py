@@ -218,14 +218,15 @@ class RaggedBatchBase:
         # print(f"执行时间: {end - start:.4f} 秒")
 
     def _deamon_process(self):
+        self.storage_engine.initialize_async()
         while True:
             seq_descriptor = None
             latents_buffer = None
             splitted_latents = []
             layer_idx = 0
             while True:
-                try:
-                    item = self._save_queue.get(timeout=0.01)
+                # try:
+                    item = self._save_queue.get()
                     if isinstance(item, torch.Tensor):
                         # seq_descriptor
                         if item.shape[1] == 4:
@@ -247,6 +248,7 @@ class RaggedBatchBase:
                                     seq_len = seq_descriptor[1]
                                     splitted_latents.append(latents_buffer[:, seq_begin:seq_begin + seq_len])
                     elif item == "end":
+                        self.storage_engine.close_async()
                         return
                     # store
                     else:
@@ -263,8 +265,8 @@ class RaggedBatchBase:
                                 request.latents_in_window[:, window_offset: window_offset + latent.shape[1]].copy_(latent)
                                 # request.
                         break
-                except queue.Empty:
-                    continue
+                # except queue.Empty:
+                #     continue
 
     def _print_profiled_times(self) -> None:
         self._iters += 1
@@ -758,7 +760,7 @@ class MIIPipeline(RaggedBatchBase):
         if self._all_rank_output:
             outputs = self._bcast_responses(outputs)
 
-        self.prefill_time.append(profiled_time[1])
+        self.prefill_time.append(profiled_time)
 
         self._save_queue.put("end")
         deamon.join()

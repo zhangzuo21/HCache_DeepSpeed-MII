@@ -3,11 +3,23 @@ import torch
 from safetensors.torch import load, save
 from typing import Union
 import hashlib
+import redis.asyncio as aioredis
+import asyncio
+import redis
 
 class StorageBackend:
     def __init__(self, max_storage_size, path, chunk_size):
         self.chunk_size = chunk_size
-        self.env = lmdb.open(path, map_size=max_storage_size)
+        # self.env = lmdb.open(path, map_size=max_storage_size)
+        # self.redis = redis.Redis(host="localhost", port=6380, db=0)
+        self.r_sync = redis.Redis(host='localhost', port=6380, db=0)
+
+    def initialize_async(self, redis):
+        # self.redis = redis.Redis(host="localhost", port=6380, db=0)
+        self.r_async = redis
+
+    # def close_async(self):
+    #     self.loop.close()
         
     def _serialize(self, latent: torch.Tensor):
         return save({"latent_bytes": latent.contiguous()})
@@ -22,22 +34,27 @@ class StorageBackend:
     def put(self, key: torch.Tensor, value: torch.Tensor):
         hashed_key = self._hashing(key)
         serialized_value = self._serialize(value)
-        with self.env.begin(write=True) as txn:
-            txn.put(hashed_key.encode(), serialized_value)
+        # with self.env.begin(write=True) as txn:
+        #     txn.put(hashed_key.encode(), serialized_value)
+        self.redis.set(hashed_key, serialized_value)
 
     def get(self, key: torch.Tensor):
         hashed_key = self._hashing(key)
-        with self.env.begin() as txn:
-            value = txn.get(hashed_key.encode())
-            if value:
-                return self._deserialize(value)
-            else:
-                return None
+        # with self.env.begin() as txn:
+        #     value = txn.get(hashed_key.encode())
+        #     if value:
+        #         return self._deserialize(value)
+        #     else:
+        #         return None
+        data = self.r_sync.get(hashed_key)
+        return self._deserialize(data) if data else None
             
 
-    def batch_put(self, keys: list[torch.Tensor], values: list[torch.Tensor]):
-        with self.env.begin(write=True) as txn:
+    async def batch_put(self, keys: list[torch.Tensor], values: list[torch.Tensor]):
+        # with self.env.begin(write=True) as txn:
+        async with self.r_async.pipeline(transaction=False) as pipe:
             for key, value in zip(keys, values):
                 hashed_key = self._hashing(key)
                 serialized_value = self._serialize(value)
-                txn.put(hashed_key.encode(), serialized_value)
+                pipe.set(hashed_key, serialized_value)
+            await pipe.execute()
