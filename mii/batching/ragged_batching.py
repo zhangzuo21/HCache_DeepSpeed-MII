@@ -79,7 +79,7 @@ class RaggedBatchBase:
         self._profiled_times: DefaultDict[str, List[int]] = defaultdict(list)
         self._iters: int = 0
         self._num_generated_tokens: int = 0
-        self.storaging_chunk_size = 4
+        self.storaging_chunk_size = 512
         self.model_size = 4096
         self.model_layer_num = 32
         self.storage_engine = storaging_engine.LatentStoragingEngie(self.storaging_chunk_size)
@@ -130,9 +130,12 @@ class RaggedBatchBase:
             tokens_to_run = []
             for request in scheduled_requests:
                 if not request.is_flush_request:
+                    begin = time.time()
                     if request.num_generated_tokens == 0:
                         restore_seq_ids.append(request.uid)
+                        begin1 = time.time()
                         latent = self.storage_engine.retrive(request.input_tokens)
+                        end1 = time.time()
                         restore_latents.append(latent)
                         restored_len = latent.shape[1] if not latent == None else 0
                         request.recorded_len += restored_len
@@ -146,11 +149,12 @@ class RaggedBatchBase:
                             uids_to_run.append(request.uid)
                             tokens_to_run.append(request.input_tokens[(request.recorded_len - 1):])
                             restore_seq_tokens.append(request.input_tokens[0:(request.recorded_len - 1)])
-
+                        end = time.time()
+                        print(f"preload time: {end - begin}")
+                        print(f"retrive time: {end1 - begin1}")
                     else:
                         uids_to_run.append(request.uid)
                         tokens_to_run.append(request.input_tokens)
-
             # print(f"resotre latents: {restore_latents}")
             # self.inference_engine.restore_kv(restore_seq_ids, restore_seq_tokens, restore_latents)
 
@@ -162,6 +166,7 @@ class RaggedBatchBase:
                 restore_seq_tokens,
                 restore_latents
             )
+            # print(f"tokens to run: {len(tokens_to_run[0])}")
 
         # short circuit if not rank 0, only rank 0 does scheduling and postprocessing of logits
         if not self.is_rank_0:
@@ -229,6 +234,7 @@ class RaggedBatchBase:
                     if isinstance(item, torch.Tensor):
                         # seq_descriptor
                         if item.shape[1] == 4:
+                            # print(f"seq descriptor: {item}")
                             seq_descriptor = item
                             token_num = 0
                             for seq in seq_descriptor:
