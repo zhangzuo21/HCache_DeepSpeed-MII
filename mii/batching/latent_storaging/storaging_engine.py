@@ -16,11 +16,13 @@ class LatentStoragingEngie:
                 retrived_list.append(stored)
         if len(retrived_list):
             retrived = torch.concat(retrived_list, dim=1)
+            # print(f"retrived: {retrived}")
             return retrived
         else:
             return None
     
     def store_seq(self, seq: torch.Tensor, value: torch.Tensor, restored_offset: int):
+        # print(f"store value: {value}")
         seq_len = seq.shape[0]
         chunk_num = seq_len // self.chunk_size
         chunk_offset = restored_offset // self.chunk_size

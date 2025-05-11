@@ -239,7 +239,8 @@ class RaggedBatchBase:
                             latents_buffer = torch.empty((self.model_layer_num, token_num, self.model_size), dtype=torch.bfloat16)
                         # latent
                         else:
-                            latents_buffer[layer_idx].copy_(item)
+                            time.sleep(0)
+                            latents_buffer[layer_idx].copy_(item, non_blocking = False)
                             layer_idx += 1
                             if layer_idx == self.model_layer_num:
                                 for idx, seq_descriptor in enumerate(seq_descriptor):                       
