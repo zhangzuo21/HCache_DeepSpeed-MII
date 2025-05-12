@@ -47,6 +47,7 @@ class StorageBackend:
         # with self.env.begin(write=True) as txn:
         begin = time.time()
         for key, value in zip(keys, values):
+            print(f"batch_put_size: {value.shape}")
             hashed_key = self._hashing(key)
             serialized_value = self._serialize(value)
             self.env[hashed_key] = serialized_value

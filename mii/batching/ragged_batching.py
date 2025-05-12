@@ -79,7 +79,7 @@ class RaggedBatchBase:
         self._profiled_times: DefaultDict[str, List[int]] = defaultdict(list)
         self._iters: int = 0
         self._num_generated_tokens: int = 0
-        self.storaging_chunk_size = 512
+        self.storaging_chunk_size = 256
         self.model_size = 4096
         self.model_layer_num = 32
         self.storage_engine = storaging_engine.LatentStoragingEngie(self.storaging_chunk_size)
@@ -158,7 +158,7 @@ class RaggedBatchBase:
             # print(f"resotre latents: {restore_latents}")
             # self.inference_engine.restore_kv(restore_seq_ids, restore_seq_tokens, restore_latents)
 
-
+            begin = time.time()
             next_token_logits = self.put(
                 uids_to_run,
                 tokens_to_run,
@@ -166,8 +166,10 @@ class RaggedBatchBase:
                 restore_seq_tokens,
                 restore_latents
             )
+            end = time.time()
+            # print(f"put time: {end - begin}")
             # print(f"tokens to run: {len(tokens_to_run[0])}")
-
+        begin = time.time()
         # short circuit if not rank 0, only rank 0 does scheduling and postprocessing of logits
         if not self.is_rank_0:
             return force
@@ -218,6 +220,8 @@ class RaggedBatchBase:
 
         if self.profile_model_time:
             self._print_profiled_times()
+        end = time.time()
+        # print(f"time after put: {end - begin}")
         # end = time.time()
 
         # print(f"执行时间: {end - start:.4f} 秒")
@@ -228,31 +232,35 @@ class RaggedBatchBase:
             latents_buffer = None
             splitted_latents = []
             layer_idx = 0
+            # last_time = time.time()
             while True:
-                try:
-                    item = self._save_queue.get(timeout=0.01)
-                    if isinstance(item, torch.Tensor):
+                # try:
+                    item = self._save_queue.get()
+                    # now_time = time.time()
+                    # print(f"")
+                    if isinstance(item, List):
                         # seq_descriptor
-                        if item.shape[1] == 4:
-                            # print(f"seq descriptor: {item}")
-                            seq_descriptor = item
-                            token_num = 0
-                            for seq in seq_descriptor:
-                                if seq[1] != 0:
-                                    token_num += seq[1]
-                                else:
-                                    break
-                            latents_buffer = torch.empty((self.model_layer_num, token_num, self.model_size), dtype=torch.bfloat16)
+                        # if item.shape[1] == 4:
+                        #     # print(f"seq descriptor: {item}")
+                        #     seq_descriptor = item
+                        #     token_num = 0
+                        #     for seq in seq_descriptor:
+                        #         if seq[1] != 0:
+                        #             token_num += seq[1]
+                        #         else:
+                        #             break
+                        seq_descriptor = item
+                        latents_buffer = torch.empty((self.model_layer_num, item[-1], self.model_size), dtype=torch.bfloat16)
                         # latent
-                        else:
-                            time.sleep(0)
-                            latents_buffer[layer_idx].copy_(item, non_blocking = False)
-                            layer_idx += 1
-                            if layer_idx == self.model_layer_num:
-                                for idx, seq_descriptor in enumerate(seq_descriptor):                       
-                                    seq_begin = seq_descriptor[0]
-                                    seq_len = seq_descriptor[1]
-                                    splitted_latents.append(latents_buffer[:, seq_begin:seq_begin + seq_len])
+                    elif isinstance(item, torch.Tensor):
+                        time.sleep(0)
+                        latents_buffer[layer_idx].copy_(item, non_blocking = False)
+                        layer_idx += 1
+                        if layer_idx == self.model_layer_num:
+                            begin_pos = 0
+                            for end_pos in seq_descriptor:                    
+                                splitted_latents.append(latents_buffer[:, begin_pos:end_pos])
+                                begin_pos = end_pos
                     elif item == "end":
                         return
                     # store
@@ -270,8 +278,8 @@ class RaggedBatchBase:
                                 request.latents_in_window[:, window_offset: window_offset + latent.shape[1]].copy_(latent)
                                 # request.
                         break
-                except queue.Empty:
-                    continue
+                # except queue.Empty:
+                #     continue
 
     def _print_profiled_times(self) -> None:
         self._iters += 1

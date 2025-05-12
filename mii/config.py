@@ -132,7 +132,7 @@ class ModelConfig(DeepSpeedConfigModel):
     can provide a set of custom configs.
     """
 
-    torch_dist_port: int = 29500
+    torch_dist_port: int = 29501
     """
     Torch distributed port to be used. This also serves as a base port when
     multiple replicas are deployed. For example, if there are 2 replicas, the
